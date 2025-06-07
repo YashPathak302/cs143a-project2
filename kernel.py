@@ -3,6 +3,7 @@
 # Members: Yash Pathak, Lawrence Tep, Caleb Yang
 
 from collections import deque
+from typing import Union
 
 # PID is just an integer, but it is used to make it clear when a integer is expected to be a valid PID.
 PID = int
@@ -14,11 +15,13 @@ class PCB:
     # Priority is also just an integer, but it is used to make it clear when a integer is expected to be a valid priority.
     priority: int
     process_type: str
+    memory_needed: int  # Added for memory management
     
-    def __init__(self, pid: PID, priority: int = 32, process_type: str = "Foreground"):
+    def __init__(self, pid: PID, priority: int = 32, process_type: str = "Foreground", memory_needed: int = 0):
         self.pid = pid
         self.priority = priority
         self.process_type = process_type
+        self.memory_needed = memory_needed
 
 # This class represents the Kernel of the simulation.
 # The simulator will create an instance of this object and use it to respond to syscalls and interrupts.
@@ -32,10 +35,11 @@ class Kernel:
     foreground_queue: deque[PCB]
     background_queue: deque[PCB]
     prev_pid: PID
+    
     # Called before the simulation begins.
     # Use this method to initilize any variables you need throughout the simulation.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def __init__(self, scheduling_algorithm: str, logger):
+    def __init__(self, scheduling_algorithm: str, logger, mmu: "MMU", memory_size: int):
         self.scheduling_algorithm = scheduling_algorithm
         self.ready_queue = deque()
         self.waiting_queue = deque()
@@ -44,13 +48,19 @@ class Kernel:
         # Dictionary to keep track of all processes by PID
         self.processes = {0: self.idle_pcb}
         self.logger = logger
+        self.mmu = mmu  # Memory Management Unit
+        self.memory_size = memory_size  # Total physical memory available
         self.prev_pid = self.idle_pcb
+        
+        # Memory management variables
+        self.allocated_memory = {}  # {pid: memory_amount}
+        self.free_memory = memory_size  # Track available memory
+        
         # stores semaphore_id mapped to its value and processes
         self.semaphores = {}  # {semaphore_id: {"value": int, "queue": deque[PCB]}}
 
         # stores mutex_id mapped to whether it's locked, its owner, and its processes
         self.mutexes = {} # {mutex_id: {"locked": bool, "owner": PID, "queue": deque[PCB]}}
-
 
         # for Round Robin scheduling, use a time quantum of 40 microseconds
         self.time_quantum = 40  # microseconds
@@ -70,13 +80,24 @@ class Kernel:
     # This method is triggered every time a new process has arrived.
     # new_process is this process's PID.
     # priority is the priority of new_process.
+    # memory_needed is the amount of memory the process requires.
     # DO NOT rename or delete this method. DO NOT change its arguments.
-    def new_process_arrived(self, new_process: PID, priority: int, process_type: str) -> PID:
+    def new_process_arrived(self, new_process: PID, priority: int, process_type: str, memory_needed: int) -> PID:
+        # Check if we have enough memory for the new process
+        if memory_needed > self.free_memory:
+            self.logger.log(f"Process {new_process} rejected: insufficient memory (needed: {memory_needed}, available: {self.free_memory})")
+            return -1  # Reject the process due to insufficient memory
+        
+        # Allocate memory for the process
+        self.free_memory -= memory_needed
+        self.allocated_memory[new_process] = memory_needed
+        self.logger.log(f"Allocated {memory_needed} memory to process {new_process}. Free memory: {self.free_memory}")
+        
         # Track the process type and priority
         # Update pcb with new process and priority
         # If the new process has a higher priority than the current running process, it should be added to the front of the queue.
         self.logger.log(f"Ready queue len:{len(self.ready_queue)} when process {new_process} arrived")
-        new_pcb = PCB(new_process, priority, process_type)
+        new_pcb = PCB(new_process, priority, process_type, memory_needed)
         self.ready_queue.append(new_pcb)
         
         #check if new process is foreground or background
@@ -88,9 +109,8 @@ class Kernel:
                 self.logger.log(f"Placing in background queue: {new_process}")
                 self.background_queue.append(new_pcb)
                 
-        
         # for bookkeeping (optional)
-        # self.processes[new_process] = new_pcb
+        self.processes[new_process] = new_pcb
         
         # Optional line: to track the process type and priority after adding to the ready queue
         # self.logger.log(f"Process {new_process} with priority {priority} added to the ready queue")
@@ -121,6 +141,13 @@ class Kernel:
 
         return self.running.pid if self.running is not None else None
     
+    # Helper method to deallocate memory when a process exits
+    def deallocate_memory(self, pid: PID):
+        if pid in self.allocated_memory:
+            memory_to_free = self.allocated_memory[pid]
+            self.free_memory += memory_to_free
+            del self.allocated_memory[pid]
+            self.logger.log(f"Deallocated {memory_to_free} memory from process {pid}. Free memory: {self.free_memory}")
     
     # Helper function to check if a process has a higher priority than another process.
     def is_higher_priority(self, new_process: PCB, current_process: PCB) -> bool:
@@ -135,6 +162,13 @@ class Kernel:
     # This method is triggered every time the current process performs an exit syscall.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_exit(self) -> PID:
+        # Deallocate memory from the exiting process
+        self.deallocate_memory(self.running.pid)
+        
+        # Remove from processes dictionary
+        if self.running.pid in self.processes:
+            del self.processes[self.running.pid]
+        
         self.running = self.choose_next_process()
         # For round robin scheduling, we need to reset the time slice for the new process
         
@@ -166,7 +200,6 @@ class Kernel:
                 self.running = highest_priority
         
         return self.running.pid
-
 
     # This is where you can select the next process to run.
     # This method is not directly called by the simulator and is purely for your convinience.
@@ -226,14 +259,12 @@ class Kernel:
                     self.logger.log("Switching from background to foreground")
                     temp = self.foreground_queue.popleft()
                     
-                    
                 self.logger.log(f"Background popping {temp.pid}")
                 self.logger.log(f"{self.time_slice_remaining}")
                 return temp
         
         # Default fallback
         return self.idle_pcb
-    
     
     # This method is triggered when the currently running process requests to initialize a new semaphore.
     # DO NOT rename or delete this method. DO NOT change its arguments.
@@ -256,7 +287,6 @@ class Kernel:
 
         # Continue running current process
         return self.running.pid
-
 
     # This method is triggered when the currently running process calls v() on an existing semaphore.
 	# DO NOT rename or delete this method. DO NOT change its arguments.
@@ -282,7 +312,6 @@ class Kernel:
 
         return self.running.pid
 
-
     # This method is triggered when the currently running process requests to initialize a new mutex.
 	# DO NOT rename or delete this method. DO NOT change its arguments.
     def syscall_init_mutex(self, mutex_id: int):
@@ -291,7 +320,6 @@ class Kernel:
             "owner": None,
             "queue": deque()
         }
-
 
     # This method is triggered when the currently running process calls lock() on an existing mutex.
 	# DO NOT rename or delete this method. DO NOT change its arguments.
@@ -307,7 +335,6 @@ class Kernel:
         mutex["queue"].append(self.running)
         self.running = self.choose_next_process()
         return self.running.pid
-
 
     # This method is triggered when the currently running process calls unlock() on an existing mutex.
 	# DO NOT rename or delete this method. DO NOT change its arguments.
@@ -370,7 +397,6 @@ class Kernel:
                         self.foreground_queue.append(self.running) 
                         self.running = self.choose_next_process()
                     
-            
             # after 200, switch
             if self.level_time_elapsed >= self.level_switch_interval:
                 if self.relapse_flag == True:
@@ -416,7 +442,6 @@ class Kernel:
                 self.logger.log("Time quantum")
                 self.ready_queue.append(self.running)
                 
-                
                 # Choose the next process
                 self.running = self.choose_next_process()
 
@@ -424,3 +449,30 @@ class Kernel:
                 self.time_slice_remaining = self.time_quantum
 
             return self.running.pid
+
+
+# This class represents the MMU of the simulation.
+# The simulator will create an instance of this object and use it to translate memory accesses.
+# DO NOT modify the name of this class or remove it.
+class MMU:
+    # Called before the simulation begins (even before kernel __init__).
+    # Use this function to initialize any variables you need throughout the simulation.
+    # DO NOT rename or delete this method. DO NOT change its arguments.
+    def __init__(self, logger):
+        self.logger = logger
+        # Initialize any MMU-specific variables here
+        # You might want to track page tables, virtual to physical address mappings, etc.
+        self.page_tables = {}  # {pid: page_table}
+        
+    # Translate the virtual address to its physical address.
+    # If it is not a valid address for the given process, return None which will cause a segmentation fault.
+    # If it is valid, translate the given virtual address to its physical address.
+    # DO NOT rename or delete this method. DO NOT change its arguments.
+    def translate(self, address: int, pid: PID) -> Union[int,  None]:
+        # For now, this is a placeholder implementation
+        # You'll need to implement proper virtual-to-physical address translation
+        # based on your memory management scheme
+        
+        # Simple implementation: for now, just return the address as-is (identity mapping)
+        # This will need to be replaced with proper page table lookup
+        return address

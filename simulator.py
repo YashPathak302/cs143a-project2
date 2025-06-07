@@ -3,6 +3,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from typing import Union
 
 from kernel import Kernel, MMU
 
@@ -380,7 +381,7 @@ class Simulator:
 class StudentLogger:
     __simluator: Simulator
 
-    def __init__(self, simulator: Simulator | None):
+    def __init__(self, simulator: Union[Simulator, None]):
         self.__simluator = simulator
 
     def log(self, str: str):
