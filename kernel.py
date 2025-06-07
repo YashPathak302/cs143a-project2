@@ -31,6 +31,7 @@ class Kernel:
     idle_pcb: PCB
     foreground_queue: deque[PCB]
     background_queue: deque[PCB]
+    prev_pid: PID
     # Called before the simulation begins.
     # Use this method to initilize any variables you need throughout the simulation.
     # DO NOT rename or delete this method. DO NOT change its arguments.
@@ -43,7 +44,7 @@ class Kernel:
         # Dictionary to keep track of all processes by PID
         self.processes = {0: self.idle_pcb}
         self.logger = logger
-
+        self.prev_pid = self.idle_pcb
         # stores semaphore_id mapped to its value and processes
         self.semaphores = {}  # {semaphore_id: {"value": int, "queue": deque[PCB]}}
 
@@ -54,6 +55,7 @@ class Kernel:
         # for Round Robin scheduling, use a time quantum of 40 microseconds
         self.time_quantum = 40  # microseconds
         self.time_slice_remaining = self.time_quantum
+        self.temp_time = 0
         
         # for multilevel 
         self.foreground_queue = deque()  # For RR scheduling
@@ -63,6 +65,7 @@ class Kernel:
         self.current_level = "Foreground"
         self.level_time_elapsed = 0
         self.level_switch_interval = 200  # microseconds
+        self.relapse_flag = False
 
     # This method is triggered every time a new process has arrived.
     # new_process is this process's PID.
@@ -134,7 +137,9 @@ class Kernel:
     def syscall_exit(self) -> PID:
         self.running = self.choose_next_process()
         # For round robin scheduling, we need to reset the time slice for the new process
-        self.time_slice_remaining = self.time_quantum
+        
+        if self.scheduling_algorithm != "Multilevel":
+            self.time_slice_remaining = self.time_quantum
         return self.running.pid
 
     # This method is triggered when the currently running process requests to change its priority.
@@ -196,6 +201,7 @@ class Kernel:
         
         elif self.scheduling_algorithm == "RR":
             # Round Robin: FIFO order
+            self.time_slice_remaining = self.time_quantum
             return self.ready_queue.popleft()
         
         elif self.scheduling_algorithm == "Multilevel":
@@ -220,7 +226,9 @@ class Kernel:
                     self.logger.log("Switching from background to foreground")
                     temp = self.foreground_queue.popleft()
                     
+                    
                 self.logger.log(f"Background popping {temp.pid}")
+                self.logger.log(f"{self.time_slice_remaining}")
                 return temp
         
         # Default fallback
@@ -241,7 +249,7 @@ class Kernel:
         sem = self.semaphores[semaphore_id]
         sem["value"] -= 1
 
-        if sem["value"] < 0: # Can't grab a semaphore, so block this process
+        if sem["value"] < 0: # block
             sem["queue"].append(self.running)
             self.running = self.choose_next_process()
             return self.running.pid
@@ -256,7 +264,6 @@ class Kernel:
         sem = self.semaphores[semaphore_id]
         sem["value"] += 1
 
-        # Checks if there are any processes waiting in the queue
         if sem["value"] <= 0 and sem["queue"]:
             if self.scheduling_algorithm == "FCFS" or self.scheduling_algorithm == "RR":
                 unblocked = min(sem["queue"], key = lambda p: p.pid)
@@ -265,7 +272,6 @@ class Kernel:
 
             sem["queue"].remove(unblocked)
 
-            # Ready to run the next process based on priority
             if self.scheduling_algorithm == "Priority" and unblocked:
                 if unblocked.priority < self.running.priority:
                     self.ready_queue.append(self.running)
@@ -315,14 +321,14 @@ class Kernel:
         mutex["owner"] = None
 
         if mutex["queue"]:  # If any processes are waiting
-            if self.scheduling_algorithm == "FCFS" or self.scheduling_algorithm == "RR":
+            if self.scheduling_algorithm in ["FCFS", "RR"]:
                 next_process = min(mutex["queue"], key = lambda p: p.pid)
             elif self.scheduling_algorithm == "Priority":
                 next_process = min(mutex["queue"], key = lambda p: (p.priority, p.pid))
 
             mutex["queue"].remove(next_process)
 
-            # Give mutex to next process directly
+            # Give mutex to next process
             mutex["locked"] = True
             mutex["owner"] = next_process.pid
 
@@ -343,35 +349,51 @@ class Kernel:
         if self.scheduling_algorithm == "Multilevel":
             self.level_time_elapsed += 10
             self.logger.log(f"[TIMER] Level: {self.current_level}, Running: {self.running.pid}")
+            self.logger.log(f"Time slice remaining: {self.time_slice_remaining}")
             if self.current_level == "Foreground":
                 self.time_slice_remaining -= 10
                 
                 if self.time_slice_remaining <= 0:
                 # Enqueue current to end and rotate RR
                     self.logger.log(f"PID {self.running.pid} out of time slice")
+                    self.time_slice_remaining = self.time_quantum
+                    if self.prev_pid == self.running.pid:
+                        self.relapse_flag = True
+                    else:
+                        self.relapse_flag = False
                     if self.level_time_elapsed >= self.level_switch_interval:
                         self.foreground_queue.append(self.running)
+                        self.prev_pid = self.running.pid
                         self.running = self.choose_next_process()
                     else:
+                        self.prev_pid = self.running.pid
                         self.foreground_queue.append(self.running) 
                         self.running = self.choose_next_process()
+                    
             
             # after 200, switch
             if self.level_time_elapsed >= self.level_switch_interval:
+                if self.relapse_flag == True:
+                    self.logger.log("Using relapse flag")
+                    self.temp_time = self.time_quantum
+                    self.relapse_flag = False
+                else:
+                    self.logger.log("Using remaining time")
+                    self.temp_time = self.time_slice_remaining
                 if self.current_level == "Foreground" and self.background_queue:
                     self.logger.log(f"Switching to background queue from foreground")
                     self.foreground_queue.appendleft(self.running)
                     self.current_level = "Background"
                     self.level_time_elapsed = 0
-                    self.time_slice_remaining = self.time_quantum
                     self.running = self.choose_next_process()
                 elif self.current_level == "Background" and self.foreground_queue:
                     self.logger.log(f"Switching to foreground queue from background")
                     self.background_queue.appendleft(self.running)
                     self.current_level = "Foreground"
                     self.level_time_elapsed = 0
-                    self.time_slice_remaining = self.time_quantum
+                    
                     self.running = self.choose_next_process()
+                    self.time_slice_remaining = self.temp_time
                 else:
                     self.logger.log(f"Remaining in queue")
                     self.level_time_elapsed = 0
@@ -383,20 +405,22 @@ class Kernel:
                 return self.running.pid
                 
             # Deduct 10μs from the current process's quantum
-            self.time_slice_remaining -= 10
+            if self.scheduling_algorithm == "RR":
+                self.time_slice_remaining -= 10
 
-            # If the process still has time, it continues running
-            if self.time_slice_remaining > 0:
-                return self.running.pid
+                # If the process still has time, it continues running
+                if self.time_slice_remaining > 0:
+                    return self.running.pid
 
-            # Otherwise, time quantum expired — preempt and switch
-            self.ready_queue.append(self.running)
-            
-            
-            # Choose the next process
-            self.running = self.choose_next_process()
+                # Otherwise, time quantum expired — preempt and switch
+                self.logger.log("Time quantum")
+                self.ready_queue.append(self.running)
+                
+                
+                # Choose the next process
+                self.running = self.choose_next_process()
 
-            # Reset the time slice for the new running process
-            self.time_slice_remaining = self.time_quantum
+                # Reset the time slice for the new running process
+                self.time_slice_remaining = self.time_quantum
 
             return self.running.pid
