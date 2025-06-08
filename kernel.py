@@ -53,9 +53,10 @@ class Kernel:
         self.prev_pid = self.idle_pcb
         
         # Memory management variables
-        self.allocated_memory = {}  # {pid: memory_amount}
-        self.free_memory = memory_size  # Track available memory
-        
+        self.allocated_memory = {}  # {pid: (start, size)}, maps pid to tuple: (start addy, size)
+        self.free_memory = [(10485760, self.memory_size - 10485760)]  # Track available memory (start, size)
+        # 10MB^
+
         # stores semaphore_id mapped to its value and processes
         self.semaphores = {}  # {semaphore_id: {"value": int, "queue": deque[PCB]}}
 
@@ -84,13 +85,27 @@ class Kernel:
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def new_process_arrived(self, new_process: PID, priority: int, process_type: str, memory_needed: int) -> PID:
         # Check if we have enough memory for the new process
-        if memory_needed > self.free_memory:
-            self.logger.log(f"Process {new_process} rejected: insufficient memory (needed: {memory_needed}, available: {self.free_memory})")
-            return -1  # Reject the process due to insufficient memory
-        
-        # Allocate memory for the process
-        self.free_memory -= memory_needed
-        self.allocated_memory[new_process] = memory_needed
+        # Use best-fit algorithm
+        best_fit = None
+        for start, size in self.free_memory:
+            if size >= memory_needed:
+                if best_fit is None or size < best_fit[1] or (
+                        size == best_fit[1] and start < best_fit[0]):
+                    best_fit = (start, size)
+
+        if best_fit is None: # No memory block large enough
+            self.logger.log(f"Process {new_process} rejected: insufficient memory")
+            return -1
+
+        start, size = best_fit
+        self.allocated_memory[new_process] = (start, memory_needed)
+        self.mmu.segment_tables[new_process] = (start, memory_needed)
+        self.free_memory.remove(best_fit)
+
+        # Shrink or split the remaining segment
+        if size > memory_needed:
+            self.free_memory.append((start + memory_needed, size - memory_needed))
+
         self.logger.log(f"Allocated {memory_needed} memory to process {new_process}. Free memory: {self.free_memory}")
         
         # Track the process type and priority
@@ -462,7 +477,7 @@ class MMU:
         self.logger = logger
         # Initialize any MMU-specific variables here
         # You might want to track page tables, virtual to physical address mappings, etc.
-        self.page_tables = {}  # {pid: page_table}
+        self.segment_tables = {}  # {pid: page_table}
         
     # Translate the virtual address to its physical address.
     # If it is not a valid address for the given process, return None which will cause a segmentation fault.
@@ -475,4 +490,10 @@ class MMU:
         
         # Simple implementation: for now, just return the address as-is (identity mapping)
         # This will need to be replaced with proper page table lookup
+        start_address = 0x20000000
+        if pid not in self.segment_tables:
+            return None
+
+
+
         return address
