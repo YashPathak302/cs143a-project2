@@ -106,7 +106,8 @@ class Kernel:
         if size > memory_needed:
             self.free_memory.append((start + memory_needed, size - memory_needed))
 
-        self.logger.log(f"Allocated {memory_needed} memory to process {new_process}. Free memory: {self.free_memory}")
+        self.logger.log(f"Allocated {memory_needed} bytes at address {start} for process {new_process}")
+
         
         # Track the process type and priority
         # Update pcb with new process and priority
@@ -159,11 +160,26 @@ class Kernel:
     # Helper method to deallocate memory when a process exits
     def deallocate_memory(self, pid: PID):
         if pid in self.allocated_memory:
-            memory_to_free = self.allocated_memory[pid]
-            self.free_memory += memory_to_free
+            start, size = self.segment_tables[pid]
+
+            self.free_memory.append((start, size))
+            self.free_memory.sort()
+
+            # Merge segments if adjacent
+            merged = []
+            for seg in self.free_memory:
+                if not merged or merged[-1][0] + merged[-1][1] < seg[0]:
+                    merged.append(seg)
+                else:
+                    prev_start, prev_size = merged.pop()
+                    merged.append((prev_start, prev_size + seg[1]))
+
+            self.free_memory = merged
+
+            # Delete the entries in the allocated_memory and segment tables dicts
             del self.allocated_memory[pid]
-            self.logger.log(f"Deallocated {memory_to_free} memory from process {pid}. Free memory: {self.free_memory}")
-    
+            del self.segment_tables[pid]
+
     # Helper function to check if a process has a higher priority than another process.
     def is_higher_priority(self, new_process: PCB, current_process: PCB) -> bool:
         # Higher priority is represented by a lower number.
@@ -484,16 +500,15 @@ class MMU:
     # If it is valid, translate the given virtual address to its physical address.
     # DO NOT rename or delete this method. DO NOT change its arguments.
     def translate(self, address: int, pid: PID) -> Union[int,  None]:
-        # For now, this is a placeholder implementation
-        # You'll need to implement proper virtual-to-physical address translation
-        # based on your memory management scheme
-        
-        # Simple implementation: for now, just return the address as-is (identity mapping)
-        # This will need to be replaced with proper page table lookup
         start_address = 0x20000000
-        if pid not in self.segment_tables:
+
+        if pid not in self.segment_tables: # Requested a nonexistent process
             return None
 
+        start, size = self.segment_tables[pid]
+        offset = address - start_address
 
+        if offset < 0 or offset >= size:
+            return None
 
-        return address
+        return start + offset
